@@ -30,11 +30,13 @@ python3 poker.py --chips 2000 --sb 25 --bb 50 --turn-time 45 --port 8000
 
 ## Prank mode
 
-```
-python3 poker.py --prank abk --reveal-after 10
-```
+Prank mode is on by default: whenever a player called `abk` (case-insensitive) is at the table, they're dealt the best hand every round. Hands without abk are dealt normally. After 10 rigged hands, every player sees a "Gotcha!" screen saying the deck was rigged, and the game is fair from then on. To reveal it early, type `reveal` in the server's terminal and press Enter.
 
-The named player (case-insensitive) is dealt the best hand every round. After the chosen number of rigged hands (1–50, default 10), every player sees a "Gotcha!" screen saying the deck was rigged, and the game is fair from then on. To reveal it early, type `reveal` in the server's terminal and press Enter.
+```
+python3 poker.py --reveal-after 5     # reveal after 5 rigged hands instead (1-50)
+python3 poker.py --prank someone      # rig it for a different name
+python3 poker.py --no-prank           # completely fair game
+```
 
 ## Notes
 

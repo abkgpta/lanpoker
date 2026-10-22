@@ -1575,13 +1575,15 @@ def main():
     ap.add_argument("--sb", type=int, default=10, help="small blind")
     ap.add_argument("--bb", type=int, default=20, help="big blind")
     ap.add_argument("--turn-time", type=int, default=60, help="seconds per turn before auto check/fold")
-    ap.add_argument("--prank", metavar="NAME", help="deal NAME the best hand every round until the reveal")
+    ap.add_argument("--prank", metavar="NAME", default="abk",
+                    help="a player with this name is dealt the best hand every round until the reveal (default: abk)")
+    ap.add_argument("--no-prank", action="store_true", help="turn prank mode off completely")
     ap.add_argument("--reveal-after", type=int, default=10, metavar="N",
-                    help="with --prank: reveal the rig to everyone after N rigged hands (1-50, default 10)")
+                    help="reveal the rig to everyone after N rigged hands (1-50, default 10)")
     a = ap.parse_args()
     if not 1 <= a.reveal_after <= 50:
         ap.error("--reveal-after must be between 1 and 50")
-    GAME = Game(a.chips, a.sb, a.bb, a.turn_time, a.prank, a.reveal_after)
+    GAME = Game(a.chips, a.sb, a.bb, a.turn_time, None if a.no_prank else a.prank, a.reveal_after)
     threading.Thread(target=clock, daemon=True).start()
     threading.Thread(target=console, daemon=True).start()
     try:
@@ -1594,9 +1596,9 @@ def main():
         raise
     print(f"Poker server running. Tell your friends to open:  http://{lan_ip()}:{a.port}")
     print("(You can play too at http://localhost:%d)  Ctrl+C to stop." % a.port)
-    if a.prank:
-        print(f"🎭 Prank mode: '{a.prank}' gets the best hand every round. Everyone sees the reveal after "
-              f"{a.reveal_after} rigged hands, or type 'reveal' here and press Enter to reveal it now.")
+    if not a.no_prank:
+        print(f"🎭 Prank mode: if a player called '{a.prank}' joins, they get the best hand every round. Everyone sees "
+              f"the reveal after {a.reveal_after} rigged hands, or type 'reveal' here and press Enter to reveal it now.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
