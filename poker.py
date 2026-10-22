@@ -1425,7 +1425,14 @@ def main():
     a = ap.parse_args()
     GAME = Game(a.chips, a.sb, a.bb, a.turn_time)
     threading.Thread(target=clock, daemon=True).start()
-    server = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
+    except OSError as e:
+        if e.errno in (48, 98, 10048):  # address already in use (macOS, Linux, Windows)
+            raise SystemExit(f"Port {a.port} is already in use — probably a poker server that's still running.\n"
+                             f"Stop it with Ctrl+C in its terminal, or run:  lsof -ti :{a.port} | xargs kill\n"
+                             f"Or pick another port:  python3 poker.py --port {a.port + 1}")
+        raise
     print(f"Poker server running. Tell your friends to open:  http://{lan_ip()}:{a.port}")
     print("(You can play too at http://localhost:%d)  Ctrl+C to stop." % a.port)
     try:
