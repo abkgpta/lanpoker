@@ -760,7 +760,7 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border: none; b
   </div>
 </div>
 <div id="hud"><span class="pill" id="info">LAN Poker</span>
-  <span><button class="small" onclick="toggleLog()">History</button><button class="small" onclick="leave()">Leave</button></span></div>
+  <span><button class="small" id="muteBtn" onclick="toggleMute()">🔊 Sound</button><button class="small" onclick="toggleLog()">History</button><button class="small" onclick="leave()">Leave</button></span></div>
 <div id="log"></div>
 <div id="controls"></div>
 <div id="toast"></div>
@@ -786,6 +786,86 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;',
 let token = null;
 try { token = localStorage.getItem('pokerToken'); } catch (e) {}
 let scale = 1, latest = null, shown = null, busy = false, seatKey = '', potAmt = 0;
+
+// ---------------------------------------------------------------- sound (synthesized, no audio files)
+const Sound = (() => {
+  let ctx = null, master = null, noiseBuf = null, muted = false;
+  try { muted = localStorage.getItem('pokerMuted') === '1'; } catch (e) {}
+  function init() {
+    if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    ctx = new AC();
+    master = ctx.createGain(); master.gain.value = .6;
+    const comp = ctx.createDynamicsCompressor();
+    master.connect(comp); comp.connect(ctx.destination);
+    noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  ['pointerdown', 'keydown'].forEach(ev => addEventListener(ev, init, { passive: true }));
+  function env(t, dur, gain, attack) {
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(gain, t + attack);
+    g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    g.connect(master);
+    return g;
+  }
+  function noise(t, dur, { type = 'bandpass', freq = 3000, sweep = 0, q = 1, gain = .4, attack = .002 } = {}) {
+    const src = ctx.createBufferSource(), f = ctx.createBiquadFilter();
+    src.buffer = noiseBuf; f.type = type; f.Q.value = q;
+    f.frequency.setValueAtTime(freq, t);
+    if (sweep) f.frequency.exponentialRampToValueAtTime(sweep, t + dur);
+    src.connect(f); f.connect(env(t, dur, gain, attack));
+    src.start(t, Math.random() * .5); src.stop(t + dur + .05);
+  }
+  function tone(t, freq, dur, { type = 'sine', gain = .2, attack = .003, to = 0 } = {}) {
+    const o = ctx.createOscillator();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if (to) o.frequency.exponentialRampToValueAtTime(to, t + dur);
+    o.connect(env(t, dur, gain, attack));
+    o.start(t); o.stop(t + dur + .05);
+  }
+  function clink(t, v = 1) {   // ceramic chip on chip: a few inharmonic partials and a click
+    const f = 2400 + Math.random() * 1600;
+    tone(t, f, .1, { gain: .1 * v }); tone(t, f * 1.47, .07, { gain: .06 * v }); tone(t, f * 2.31, .05, { gain: .035 * v });
+    noise(t, .02, { type: 'highpass', freq: 5000, gain: .22 * v });
+  }
+  const S = {
+    deal(t) { noise(t, .13, { freq: 2600, sweep: 900, q: .7, gain: .3 }); noise(t + .1, .05, { freq: 1100, gain: .22 }); },
+    flip(t) { noise(t, .045, { type: 'highpass', freq: 2600, gain: .3 }); noise(t + .025, .06, { freq: 750, q: 1.2, gain: .22 }); },
+    shuffle(t) { for (let i = 0; i < 16; i++) noise(t + i * .028 + Math.random() * .01, .03, { freq: 2500 + Math.random() * 2000, gain: .13 }); },
+    chips(t, n = 3) {
+      for (let i = 0; i < n; i++) clink(t + i * (.03 + Math.random() * .03), 1 - i * .07);
+      noise(t, .06, { type: 'lowpass', freq: 700, gain: .2 });
+    },
+    sweep(t) { noise(t, .38, { freq: 1700, sweep: 600, q: .6, gain: .2 }); for (let i = 0; i < 8; i++) clink(t + .06 + i * .04 + Math.random() * .02, .55); },
+    knock(t) { for (const d of [0, .14]) { tone(t + d, 150, .12, { gain: .45, to: 70 }); noise(t + d, .04, { type: 'lowpass', freq: 900, gain: .35 }); } },
+    fold(t) { noise(t, .3, { freq: 1400, sweep: 380, q: .5, gain: .2 }); },
+    turn(t) { tone(t, 880, .4, { type: 'triangle', gain: .1 }); tone(t + .13, 1318.5, .6, { type: 'triangle', gain: .1 }); },
+    tick(t) { tone(t, 1900, .035, { type: 'square', gain: .035 }); },
+    allin(t) { tone(t, 95, .7, { gain: .4, to: 42 }); noise(t, .45, { type: 'lowpass', freq: 320, gain: .3 }); S.chips(t + .05, 7); },
+    win(t, mine) {
+      for (let i = 0; i < 12; i++) clink(t + i * .045 + Math.random() * .02, .75);
+      if (mine) [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
+        tone(t + .1 + i * .11, f, .7, { type: 'triangle', gain: .09 }); tone(t + .1 + i * .11, f * 2, .4, { gain: .03 });
+      });
+    },
+    click(t) { noise(t, .018, { type: 'highpass', freq: 3200, gain: .1 }); },
+  };
+  return {
+    play(name, delayMs = 0, ...args) {
+      if (muted || !ctx || ctx.state !== 'running' || SPEED < 1) return;
+      S[name](ctx.currentTime + .01 + delayMs / 1000, ...args);
+    },
+    get muted() { return muted; },
+    toggle() { muted = !muted; try { localStorage.setItem('pokerMuted', muted ? '1' : '0'); } catch (e) {} init(); return muted; },
+  };
+})();
+const sfx = (...a) => Sound.play(...a);
+function toggleMute() { $('muteBtn').textContent = Sound.toggle() ? '🔇 Sound' : '🔊 Sound'; }
+addEventListener('pointerdown', e => { if (e.target.closest('.btn, .presets button, .small')) sfx('click'); });
 const seats = {};
 
 // ---------------------------------------------------------------- layout
@@ -831,6 +911,7 @@ function setCard(c, code, anim = true) {
       f.innerHTML = faceHTML(code);
       f.classList.toggle('red', 'hd'.includes(code[1]));
       c.classList.add('up');
+      if (anim) sfx('flip');
     }
   };
   anim ? apply() : instant(c, apply);
@@ -906,11 +987,13 @@ function dealTo(slot, delay, from) {
   resetCard(slot);
   instant(slot, () => { slot.dataset.code = '??'; });
   const w = parseFloat(getComputedStyle(slot).getPropertyValue('--w')) || 64;
+  sfx('deal', delay * SPEED);
   return fly(makeCard(w), from || center($('deck')), center(slot),
     { dur: 430, delay, r0: -12, r1: parseFloat(slot.dataset.rot || 0), arc: 26 })
     .then(() => instant(slot, () => slot.classList.remove('hidden')));
 }
 function muck(st) {
+  if (st.cards.some(c => !c.classList.contains('hidden'))) sfx('fold');
   st.cards.forEach((c, k) => {
     if (c.classList.contains('hidden')) return;
     const w = parseFloat(getComputedStyle(c).getPropertyValue('--w'));
@@ -925,12 +1008,14 @@ async function betChips(name, to, delay = 0) {
   if (!st || to <= st.betAmt) return;
   const amt = to - st.betAmt;
   await fly(wrapStack(amt, 3), center(st.plate), center(st.bet), { dur: 480, delay, arc: 36, s0: .8 });
+  sfx('chips', 0, Math.min(8, 2 + Math.round(Math.log10(amt + 1) * 1.6)));
   setBet(st, to);
 }
 async function gather() {
   const list = Object.values(seats).filter(st => st.betAmt > 0);
   if (!list.length) return;
   let total = potAmt;
+  sfx('sweep', 300 * SPEED);
   await Promise.all(list.map((st, k) => {
     const amt = st.betAmt, from = center(st.bet);
     total += amt; setBet(st, 0);
@@ -942,6 +1027,8 @@ function bubble(st, text) {
   const b = st.bubble, kind = text.split(' ')[0].toLowerCase();
   b.className = 'bubble ' + (kind === 'all' ? 'allin' : kind === 'small' || kind === 'big' ? 'blind' : kind);
   b.textContent = text;
+  if (kind === 'check') sfx('knock');
+  else if (kind === 'all') sfx('allin');
   b.offsetWidth;
   b.classList.add('show');
   clearTimeout(b._t);
@@ -1095,7 +1182,7 @@ async function payout(s) {
   await Promise.all(ws.map((w, k) => {
     const st = seats[w.name]; if (!st) return;
     return fly(wrapStack(w.amount, 5), from, center(st.plate), { dur: 800, delay: 250 + k * 160, arc: 50 })
-      .then(() => floater(st, '+' + fmt(w.amount)));
+      .then(() => { sfx('win', 0, w.name === s.me.name); floater(st, '+' + fmt(w.amount)); });
   }));
 }
 
@@ -1132,7 +1219,8 @@ async function newHand(p, s) {
   await wait(visible.length ? 380 : 0);
   visible.forEach(resetCard);
   positionDealer(s);
-  await wait(350);
+  sfx('shuffle');
+  await wait(450);
   const di = Math.max(0, s.players.findIndex(x => x.dealer));
   const order = [...s.players.slice(di + 1), ...s.players.slice(0, di + 1)].filter(x => x.in_hand);
   const lands = [];
@@ -1212,9 +1300,12 @@ function receive(s) {
 }
 
 // ---------------------------------------------------------------- controls
-let ctrlKey = '';
+let ctrlKey = '', wasMyTurn = false, lastTick = null;
 function renderControls(s) {
   const me = s.me, c = $('controls');
+  if (me.my_turn && !wasMyTurn) sfx('turn', 200);
+  if (me.my_turn && s.time_left != null && s.time_left <= 10 && s.time_left !== lastTick) sfx('tick');
+  wasMyTurn = me.my_turn; lastTick = me.my_turn ? s.time_left : null;
   const key = [s.stage, me.my_turn, me.to_call, me.can_check, me.min_raise_to, me.max_raise_to, me.can_rebuy, s.players.length, s.hand_no,
     s.stage === 'waiting' || me.my_turn ? '' : (s.players.find(p => p.turn) || {}).name].join('|');
   if (key !== ctrlKey) {
@@ -1317,6 +1408,7 @@ async function poll() {
   polling = false;
 }
 fit();
+if (Sound.muted) $('muteBtn').textContent = '🔇 Sound';
 if (token) poll(); else $('name').focus();
 </script></body></html>
 """

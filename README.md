@@ -23,6 +23,7 @@ python3 poker.py --chips 2000 --sb 25 --bb 50 --turn-time 45 --port 8000
 - Side pots and split pots; board runs out face-up when everyone is all-in
 - Realistic table, cards and chip stacks with animated dealing, card flips, betting, pot collection and payouts
 - Shows the name of your current best hand; winning cards light up at showdown
+- Synthesized sound effects (deal, flips, chips, checks, all-ins, your-turn chime, timer ticks, wins) with a mute button
 - Turn timer (auto check/fold); disconnected players are folded after ~20s
 - Rebuy when you bust; join or leave between hands; refreshing keeps your seat
 
