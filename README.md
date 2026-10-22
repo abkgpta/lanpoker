@@ -24,8 +24,17 @@ python3 poker.py --chips 2000 --sb 25 --bb 50 --turn-time 45 --port 8000
 - Realistic table, cards and chip stacks with animated dealing, card flips, betting, pot collection and payouts
 - Shows the name of your current best hand; winning cards light up at showdown
 - Synthesized sound effects (deal, flips, chips, checks, all-ins, your-turn chime, timer ticks, wins) with a mute button
+- Background music: a quiet, endless lounge-jazz trio generated in the browser, with its own on/off button
 - Turn timer (auto check/fold); disconnected players are folded after ~20s
 - Rebuy when you bust; join or leave between hands; refreshing keeps your seat
+
+## Prank mode
+
+```
+python3 poker.py --prank abk --reveal-after 10
+```
+
+The named player (case-insensitive) is dealt the best hand every round. After the chosen number of rigged hands (1–50, default 10), every player sees a "Gotcha!" screen saying the deck was rigged, and the game is fair from then on. To reveal it early, type `reveal` in the server's terminal and press Enter.
 
 ## Notes
 

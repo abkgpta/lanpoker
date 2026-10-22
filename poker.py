@@ -10,6 +10,7 @@ import json
 import random
 import secrets
 import socket
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -90,8 +91,12 @@ class Player:
 
 
 class Game:
-    def __init__(self, chips, sb, bb, turn_time):
+    def __init__(self, chips, sb, bb, turn_time, prank=None, reveal_after=10):
         self.lock = threading.RLock()
+        # prank mode: one player is dealt the best hand until the reveal, which always happens
+        self.prank = {"name": prank.lower(), "after": reveal_after, "rigged": 0} if prank else None
+        self.rigged_hand = False
+        self.reveal = None
         self.start_chips, self.sb, self.bb, self.turn_time = chips, sb, bb, turn_time
         self.players = []
         self.stage = "waiting"
@@ -196,6 +201,8 @@ class Game:
         self.post(self.players[sb_i], self.sb, "small blind")
         self.post(self.players[bb_i], self.bb, "big blind")
         self.current_bet, self.min_raise = self.bb, self.bb
+        target = self.prank_target()
+        self.rigged_hand = bool(target) and self.rig_deck(target)
         for _ in range(2):
             for p in self.players:
                 if p.in_hand:
@@ -203,6 +210,38 @@ class Game:
         self.stage = "preflop"
         self.turn = bb_i
         self.advance()
+
+    def prank_target(self):
+        if not self.prank or self.reveal:
+            return None
+        return next((p for p in self.players if p.in_hand and p.name.lower() == self.prank["name"]), None)
+
+    def rig_deck(self, target):
+        """Reshuffle until the target's hole cards plus the board beat everyone else's."""
+        dealt = [p for p in self.players if p.in_hand]
+        k, ti = len(dealt), dealt.index(target)
+        for _ in range(5000):
+            seq = self.deck[::-1]   # cards come off the end: hole cards, then burn/flop, burn/turn, burn/river
+            holes = [[seq[i], seq[k + i]] for i in range(k)]
+            board = [seq[2 * k + 1], seq[2 * k + 2], seq[2 * k + 3], seq[2 * k + 5], seq[2 * k + 7]]
+            mine = best_hand(holes[ti] + board)
+            if all(best_hand(h + board) < mine for j, h in enumerate(holes) if j != ti):
+                return True
+            rng.shuffle(self.deck)
+        return False
+
+    def do_reveal(self):
+        if not self.prank or self.reveal:
+            return False
+        n = self.prank["rigged"] + (1 if self.rigged_hand and self.stage in BETTING else 0)
+        name = next((p.name for p in self.players if p.name.lower() == self.prank["name"]), self.prank["name"])
+        self.reveal = {"id": secrets.token_hex(4),
+                       "text": f"The deck was rigged! {name} was dealt the best hand for "
+                               f"{n} hand{'' if n == 1 else 's'}. Everything from here on is a fair game."}
+        self.rigged_hand = False
+        self.say(f"🎭 Prank revealed: the deck was rigged for {name}. It's a fair game from now on.")
+        print(f"Prank revealed to everyone ({n} rigged hands).")
+        return True
 
     def post(self, p, amount, label):
         amt = min(amount, p.chips)
@@ -354,6 +393,11 @@ class Game:
         self.stage = "hand_over"
         self.turn = None
         self.hand_over_at = time.time()
+        if self.rigged_hand:
+            self.prank["rigged"] += 1
+            self.rigged_hand = False
+            if self.prank["rigged"] >= self.prank["after"]:
+                self.do_reveal()
         for p in [p for p in self.players if p.left]:
             self.players.remove(p)
         self.dealer = min(self.dealer, len(self.players) - 1)
@@ -401,6 +445,7 @@ class Game:
             "pot": sum(p.contrib for p in self.players), "players": players,
             "log": self.log[-15:], "results": self.results,
             "winners": self.winners, "win_cards": self.win_cards, "turn_time": self.turn_time,
+            "reveal": self.reveal,
             "sb": self.sb, "bb": self.bb,
             "time_left": max(0, int(self.turn_time - (time.time() - self.turn_started)))
             if self.turn is not None else None,
@@ -481,6 +526,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, GAME.view(p))
             except ValueError as e:
                 return self.send(400, {"error": str(e)})
+
+
+def console():
+    """Lets the host type commands into the server's terminal."""
+    for line in sys.stdin:
+        cmd = line.strip().lower()
+        if cmd == "reveal":
+            with GAME.lock:
+                if not GAME.do_reveal():
+                    print("Nothing to reveal (prank mode is off or already revealed).")
+        elif cmd:
+            print("Commands: reveal")
 
 
 def clock():
@@ -744,6 +801,17 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border: none; b
 .jbox input:focus { box-shadow: inset 0 0 0 1.5px var(--gold), 0 0 18px rgba(233,196,106,.25); }
 .jbox .btn { width: 260px; }
 .err { color: #ff8f86; min-height: 1.4em; margin-top: 10px; font-size: 14px; }
+#reveal { position: fixed; inset: 0; z-index: 55; display: flex; align-items: center; justify-content: center;
+  background: rgba(6,5,4,.6); backdrop-filter: blur(5px); opacity: 0; pointer-events: none; transition: opacity .5s; }
+#reveal.show { opacity: 1; pointer-events: auto; }
+.rbox { text-align: center; max-width: 440px; padding: 30px 30px 26px; border-radius: 22px; background: rgba(20,18,16,.92);
+  box-shadow: 0 0 0 1px rgba(233,196,106,.45), 0 30px 70px rgba(0,0,0,.7); transform: scale(.7) rotate(-4deg);
+  transition: transform .7s cubic-bezier(.3,1.6,.5,1); }
+#reveal.show .rbox { transform: none; }
+.rbox .mask { font-size: 64px; animation: wobble 1.2s ease-in-out infinite; display: inline-block; }
+@keyframes wobble { 0%, 100% { transform: rotate(-10deg); } 50% { transform: rotate(10deg) scale(1.08); } }
+.rbox h2 { margin: 6px 0 8px; font: 700 40px Georgia, serif; color: var(--gold); }
+.rbox p { margin: 0 0 20px; color: #ddd; line-height: 1.5; font-size: 16px; }
 @media (prefers-reduced-motion: reduce) { .seat.turn .plate { animation: none; } }
 </style></head><body>
 <div id="room">
@@ -760,10 +828,12 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border: none; b
   </div>
 </div>
 <div id="hud"><span class="pill" id="info">LAN Poker</span>
-  <span><button class="small" id="muteBtn" onclick="toggleMute()">🔊 Sound</button><button class="small" onclick="toggleLog()">History</button><button class="small" onclick="leave()">Leave</button></span></div>
+  <span><button class="small" id="musicBtn" onclick="toggleMusic()">🎵 Music</button><button class="small" id="muteBtn" onclick="toggleMute()">🔊 Sound</button><button class="small" onclick="toggleLog()">History</button><button class="small" onclick="leave()">Leave</button></span></div>
 <div id="log"></div>
 <div id="controls"></div>
 <div id="toast"></div>
+<div id="reveal"><div class="rbox"><div class="mask">🎭</div><h2>Gotcha!</h2><p id="revealText"></p>
+  <button class="btn raise" onclick="$('reveal').classList.remove('show')">😂 Fair enough</button></div></div>
 <div id="join"><div class="jbox">
   <div class="fan" id="fan"></div>
   <h1>LAN Poker</h1><p>Texas Hold'em</p>
@@ -792,7 +862,7 @@ const Sound = (() => {
   let ctx = null, master = null, noiseBuf = null, muted = false;
   try { muted = localStorage.getItem('pokerMuted') === '1'; } catch (e) {}
   function init() {
-    if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
+    if (ctx) { if (ctx.state === 'suspended') ctx.resume(); startMusic(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     ctx = new AC();
@@ -802,22 +872,23 @@ const Sound = (() => {
     noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
     const d = noiseBuf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    startMusic();
   }
   ['pointerdown', 'keydown'].forEach(ev => addEventListener(ev, init, { passive: true }));
-  function env(t, dur, gain, attack) {
+  function env(t, dur, gain, attack, dest) {
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(gain, t + attack);
     g.gain.exponentialRampToValueAtTime(.0001, t + dur);
-    g.connect(master);
+    g.connect(dest || master);
     return g;
   }
-  function noise(t, dur, { type = 'bandpass', freq = 3000, sweep = 0, q = 1, gain = .4, attack = .002 } = {}) {
+  function noise(t, dur, { type = 'bandpass', freq = 3000, sweep = 0, q = 1, gain = .4, attack = .002, dest } = {}) {
     const src = ctx.createBufferSource(), f = ctx.createBiquadFilter();
     src.buffer = noiseBuf; f.type = type; f.Q.value = q;
     f.frequency.setValueAtTime(freq, t);
     if (sweep) f.frequency.exponentialRampToValueAtTime(sweep, t + dur);
-    src.connect(f); f.connect(env(t, dur, gain, attack));
+    src.connect(f); f.connect(env(t, dur, gain, attack, dest));
     src.start(t, Math.random() * .5); src.stop(t + dur + .05);
   }
   function tone(t, freq, dur, { type = 'sine', gain = .2, attack = .003, to = 0 } = {}) {
@@ -853,17 +924,90 @@ const Sound = (() => {
       });
     },
     click(t) { noise(t, .018, { type: 'highpass', freq: 3200, gain: .1 }); },
+    gotcha(t) {   // sad trombone: wah, wah, wah, waaaah
+      [[392, .32], [370, .32], [349, .32], [330, 1.3]].forEach(([f, d], i) => {
+        const st = t + i * .36, o = ctx.createOscillator(), lp = ctx.createBiquadFilter();
+        o.type = 'sawtooth'; o.frequency.setValueAtTime(f, st); lp.type = 'lowpass'; lp.Q.value = 4;
+        lp.frequency.setValueAtTime(500, st); lp.frequency.linearRampToValueAtTime(1600, st + .12);
+        lp.frequency.linearRampToValueAtTime(700, st + d);
+        if (i === 3) {
+          const lfo = ctx.createOscillator(), lg = ctx.createGain();
+          lfo.frequency.value = 5.5; lg.gain.value = 9; lfo.connect(lg); lg.connect(o.frequency);
+          lfo.start(st); lfo.stop(st + d + .1);
+        }
+        o.connect(lp); lp.connect(env(st, d, .16, .04)); o.start(st); o.stop(st + d + .1);
+      });
+    },
   };
+
+  // ---- background music: an endless, quiet lounge-jazz trio generated on the fly
+  let musicOn = true, mbus = null, timer = null, nextT = 0, beat = 0;
+  try { musicOn = localStorage.getItem('pokerMusic') !== '0'; } catch (e) {}
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+  const SPB = 60 / 76;   // seconds per beat
+  const SONG = [         // [bass root, piano voicing]: Dm9 G13 Cmaj9 Am9 Dm9 G7b9 Cmaj9 A7b9
+    [38, [53, 57, 60, 64]], [43, [53, 59, 64, 69]], [36, [52, 55, 59, 62]], [45, [55, 59, 60, 64]],
+    [38, [53, 57, 60, 64]], [43, [53, 56, 59, 62]], [36, [52, 55, 59, 62]], [45, [55, 61, 64, 70]]];
+  function voice(t, freq, dur, gain, { type = 'sine', cutoff = 2400, attack = .012 } = {}) {
+    const o = ctx.createOscillator(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+    o.type = type; o.frequency.value = freq; f.type = 'lowpass'; f.frequency.value = cutoff;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(gain, t + attack);
+    g.gain.exponentialRampToValueAtTime(gain * .35, t + attack + .25);
+    g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(f); f.connect(g); g.connect(mbus); o.start(t); o.stop(t + dur + .05);
+  }
+  function keys(t, notes, dur, gain) {   // soft electric piano: sine plus a quiet bell-like overtone
+    for (const n of notes) { voice(t, mtof(n), dur, gain); voice(t, mtof(n) * 2.003, dur * .5, gain * .22, { type: 'triangle' }); }
+  }
+  function scheduleBeat(t, i) {
+    const bar = Math.floor(i / 4) % SONG.length, b = i % 4, [root, chord] = SONG[bar];
+    const next = SONG[(bar + 1) % SONG.length][0], swing = SPB * 2 / 3;
+    const walk = [root, root + 7, root + 12, next + (bar % 2 ? -1 : 1)];   // walking bass with a chromatic approach
+    voice(t, mtof(walk[b]), SPB * .95, .17, { type: 'triangle', cutoff: 650, attack: .006 });
+    if (b === 0) keys(t + .01, chord, SPB * 1.5, .026);
+    if (b === 1 && Math.random() < .7) keys(t + swing, chord, SPB * 1.2, .02);
+    if (b === 3 && Math.random() < .3) keys(t + swing, chord, SPB * .8, .016);
+    noise(t, .2, { type: 'highpass', freq: 7000, gain: .02, dest: mbus });                     // ride cymbal
+    if (b % 2) {
+      noise(t + swing, .12, { type: 'highpass', freq: 7500, gain: .014, dest: mbus });
+      noise(t, .28, { freq: 2400, q: .5, gain: .018, dest: mbus });                              // brushed snare
+    }
+    for (const off of [0, swing]) if (Math.random() < .18)                                        // a few vibraphone notes
+      voice(t + off, mtof(chord[Math.floor(Math.random() * chord.length)] + 12), SPB * 1.8, .028, { cutoff: 4000, attack: .004 });
+  }
+  function musicTick() { while (nextT < ctx.currentTime + .4) { scheduleBeat(nextT, beat++); nextT += SPB; } }
+  function startMusic() {
+    if (!ctx || timer || !musicOn || document.hidden) return;
+    if (!mbus) { mbus = ctx.createGain(); mbus.connect(master); }
+    const now = ctx.currentTime;
+    mbus.gain.cancelScheduledValues(now); mbus.gain.setValueAtTime(0, now); mbus.gain.linearRampToValueAtTime(.85, now + 2.5);
+    nextT = now + .15; timer = setInterval(musicTick, 100); musicTick();
+  }
+  function stopMusic() {
+    if (!timer) return;
+    clearInterval(timer); timer = null;
+    mbus.gain.cancelScheduledValues(ctx.currentTime); mbus.gain.setTargetAtTime(0, ctx.currentTime, .25);
+  }
+  document.addEventListener('visibilitychange', () => document.hidden ? stopMusic() : startMusic());
   return {
     play(name, delayMs = 0, ...args) {
       if (muted || !ctx || ctx.state !== 'running' || SPEED < 1) return;
       S[name](ctx.currentTime + .01 + delayMs / 1000, ...args);
     },
     get muted() { return muted; },
+    get musicOn() { return musicOn; },
+    toggleMusic() {
+      musicOn = !musicOn;
+      try { localStorage.setItem('pokerMusic', musicOn ? '1' : '0'); } catch (e) {}
+      init(); musicOn ? startMusic() : stopMusic();
+      return musicOn;
+    },
     toggle() { muted = !muted; try { localStorage.setItem('pokerMuted', muted ? '1' : '0'); } catch (e) {} init(); return muted; },
   };
 })();
 const sfx = (...a) => Sound.play(...a);
+function toggleMusic() { $('musicBtn').textContent = Sound.toggleMusic() ? '🎵 Music' : '🎵 Music off'; }
 function toggleMute() { $('muteBtn').textContent = Sound.toggle() ? '🔇 Sound' : '🔊 Sound'; }
 addEventListener('pointerdown', e => { if (e.target.closest('.btn, .presets button, .small')) sfx('click'); });
 const seats = {};
@@ -1286,8 +1430,16 @@ async function pump() {
   }
   busy = false;
 }
+let revealSeen = null;
+try { revealSeen = localStorage.getItem('pokerReveal'); } catch (e) {}
 function receive(s) {
   latest = s;
+  if (s.reveal && s.reveal.id !== revealSeen) {
+    revealSeen = s.reveal.id;
+    try { localStorage.setItem('pokerReveal', revealSeen); } catch (e) {}
+    setTimeout(() => { $('revealText').textContent = s.reveal.text; $('reveal').classList.add('show'); sfx('gotcha'); },
+      (s.stage === 'hand_over' ? 4000 : 300) * SPEED);
+  }
   $('join').classList.add('gone');
   $('info').textContent = s.hand_no ? `Hand #${s.hand_no} · Blinds ${s.sb}/${s.bb}` : `Blinds ${s.sb}/${s.bb}`;
   $('log').innerHTML = s.log.map(esc).join('<br>');
@@ -1409,6 +1561,7 @@ async function poll() {
 }
 fit();
 if (Sound.muted) $('muteBtn').textContent = '🔇 Sound';
+if (!Sound.musicOn) $('musicBtn').textContent = '🎵 Music off';
 if (token) poll(); else $('name').focus();
 </script></body></html>
 """
@@ -1422,9 +1575,15 @@ def main():
     ap.add_argument("--sb", type=int, default=10, help="small blind")
     ap.add_argument("--bb", type=int, default=20, help="big blind")
     ap.add_argument("--turn-time", type=int, default=60, help="seconds per turn before auto check/fold")
+    ap.add_argument("--prank", metavar="NAME", help="deal NAME the best hand every round until the reveal")
+    ap.add_argument("--reveal-after", type=int, default=10, metavar="N",
+                    help="with --prank: reveal the rig to everyone after N rigged hands (1-50, default 10)")
     a = ap.parse_args()
-    GAME = Game(a.chips, a.sb, a.bb, a.turn_time)
+    if not 1 <= a.reveal_after <= 50:
+        ap.error("--reveal-after must be between 1 and 50")
+    GAME = Game(a.chips, a.sb, a.bb, a.turn_time, a.prank, a.reveal_after)
     threading.Thread(target=clock, daemon=True).start()
+    threading.Thread(target=console, daemon=True).start()
     try:
         server = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
     except OSError as e:
@@ -1435,6 +1594,9 @@ def main():
         raise
     print(f"Poker server running. Tell your friends to open:  http://{lan_ip()}:{a.port}")
     print("(You can play too at http://localhost:%d)  Ctrl+C to stop." % a.port)
+    if a.prank:
+        print(f"🎭 Prank mode: '{a.prank}' gets the best hand every round. Everyone sees the reveal after "
+              f"{a.reveal_after} rigged hands, or type 'reveal' here and press Enter to reveal it now.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
