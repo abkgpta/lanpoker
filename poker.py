@@ -91,8 +91,10 @@ class Player:
 
 
 class Game:
-    def __init__(self, chips, sb, bb, turn_time, prank=None, reveal_after=10):
+    def __init__(self, chips, sb, bb, turn_time, prank=None, reveal_after=10, min_buyin=None, max_buyin=None):
         self.lock = threading.RLock()
+        self.min_buyin = min_buyin or min(chips, bb * 10)
+        self.max_buyin = max_buyin or max(chips * 10, self.min_buyin)
         # prank mode: one player is dealt the best hand until the reveal, which always happens
         self.prank = {"name": prank.lower(), "after": reveal_after, "rigged": 0} if prank else None
         self.rigged_hand = False
@@ -124,7 +126,17 @@ class Game:
 
     # ---- seating
 
-    def join(self, name):
+    def buyin_amount(self, amount):
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            raise ValueError("Enter a buy-in amount")
+        if not self.min_buyin <= amount <= self.max_buyin:
+            raise ValueError(f"Buy-in must be between {self.min_buyin:,} and {self.max_buyin:,}")
+        return amount
+
+    def join(self, name, buyin=None):
+        buyin = self.start_chips if buyin is None else self.buyin_amount(buyin)
         name = " ".join(name.split())[:16]
         if not name:
             raise ValueError("Enter a name")
@@ -132,9 +144,9 @@ class Game:
             raise ValueError("That name is taken")
         if sum(not p.left for p in self.players) >= 9:
             raise ValueError("Table is full (9 max)")
-        p = Player(name, self.start_chips)
+        p = Player(name, buyin)
         self.players.append(p)
-        self.say(f"{name} sat down" + (" (plays next hand)" if self.stage in BETTING else ""))
+        self.say(f"{name} sat down with {buyin:,}" + (" (plays next hand)" if self.stage in BETTING else ""))
         return p
 
     def leave(self, p):
@@ -149,11 +161,14 @@ class Game:
         if self.stage not in BETTING:
             self.players.remove(p)
 
-    def rebuy(self, p):
+    def rebuy(self, p, amount):
         if p.chips > 0 or (p.in_hand and self.stage in BETTING):
             raise ValueError("You can only rebuy when you're out of chips")
-        p.chips = self.start_chips
-        self.say(f"{p.name} rebought for {self.start_chips}")
+        p.chips = self.buyin_amount(amount)
+        self.say(f"{p.name} bought back in for {p.chips:,}")
+
+    def buyin_info(self):
+        return {"default": self.start_chips, "min": self.min_buyin, "max": self.max_buyin}
 
     # ---- dealing
 
@@ -445,7 +460,7 @@ class Game:
             "pot": sum(p.contrib for p in self.players), "players": players,
             "log": self.log[-15:], "results": self.results,
             "winners": self.winners, "win_cards": self.win_cards, "turn_time": self.turn_time,
-            "reveal": self.reveal,
+            "reveal": self.reveal, "buyin": self.buyin_info(),
             "sb": self.sb, "bb": self.bb,
             "time_left": max(0, int(self.turn_time - (time.time() - self.turn_started)))
             if self.turn is not None else None,
@@ -488,6 +503,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/":
             return self.send(200, PAGE, "text/html; charset=utf-8")
+        if url.path == "/config":
+            return self.send(200, {"buyin": GAME.buyin_info()})
         if url.path == "/state":
             token = parse_qs(url.query).get("token", [""])[0]
             with GAME.lock:
@@ -507,7 +524,7 @@ class Handler(BaseHTTPRequestHandler):
         with GAME.lock:
             try:
                 if path == "/join":
-                    p = GAME.join(str(body.get("name", "")))
+                    p = GAME.join(str(body.get("name", "")), body.get("buyin"))
                     return self.send(200, {"token": p.token})
                 p = self.player(body.get("token", ""))
                 if not p:
@@ -517,7 +534,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == "/action":
                     GAME.act(p, body.get("action"), body.get("amount", 0))
                 elif path == "/rebuy":
-                    GAME.rebuy(p)
+                    GAME.rebuy(p, body.get("amount"))
                 elif path == "/leave":
                     GAME.leave(p)
                     return self.send(200, {"ok": True})
@@ -798,6 +815,17 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border: none; b
 .jbox input { display: block; margin: 0 auto 12px; width: 260px; padding: 14px 16px; border-radius: 12px; border: none; outline: none;
   font: inherit; font-size: 17px; text-align: center; color: #fff; background: rgba(255,255,255,.08);
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), inset 0 2px 6px rgba(0,0,0,.4); transition: box-shadow .2s; }
+.jbox .blabel { display: block; margin: 4px 0 6px; font-size: 12px; color: #a99; letter-spacing: .08em; text-transform: uppercase; }
+.jbox .blabel span { text-transform: none; letter-spacing: 0; opacity: .8; }
+input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }
+.amount { width: 116px; padding: 9px 10px; border-radius: 10px; border: none; outline: none; text-align: center;
+  font: 700 18px system-ui, sans-serif; color: #fff; background: rgba(0,0,0,.45); font-variant-numeric: tabular-nums;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); transition: box-shadow .2s; }
+.amount:focus { box-shadow: inset 0 0 0 1.5px var(--gold), 0 0 14px rgba(233,196,106,.3); }
+.amount.bad { box-shadow: inset 0 0 0 1.5px #ff6b6b; }
+.slide { display: flex; gap: 8px; align-items: center; }
+.rebuy { display: flex; gap: 8px; align-items: center; }
 .jbox input:focus { box-shadow: inset 0 0 0 1.5px var(--gold), 0 0 18px rgba(233,196,106,.25); }
 .jbox .btn { width: 260px; }
 .err { color: #ff8f86; min-height: 1.4em; margin-top: 10px; font-size: 14px; }
@@ -838,6 +866,8 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border: none; b
   <div class="fan" id="fan"></div>
   <h1>LAN Poker</h1><p>Texas Hold'em</p>
   <input id="name" placeholder="Your name" maxlength="16" autocomplete="off">
+  <label class="blabel" for="buyin">Buy-in <span id="buyinRange"></span></label>
+  <input id="buyin" type="number" inputmode="numeric" placeholder="Buy-in" value="1000">
   <button class="btn raise" onclick="join()">Take a seat</button>
   <div class="err" id="joinErr"></div>
 </div></div>
@@ -1471,9 +1501,11 @@ function renderControls(s) {
       if (canRaise && !onlyAllIn) html += `<div class="raisebox">
           <div class="presets"><button onclick="preset('min')">Min</button><button onclick="preset(.5)">½ Pot</button>
           <button onclick="preset(.75)">¾ Pot</button><button onclick="preset(1)">Pot</button><button onclick="preset('max')">All in</button></div>
-          <input type="range" id="raiseAmt" min="${me.min_raise_to}" max="${me.max_raise_to}" step="1" value="${me.min_raise_to}" oninput="slid()">
+          <div class="slide"><input type="range" id="raiseAmt" min="${me.min_raise_to}" max="${me.max_raise_to}" step="1" value="${me.min_raise_to}" oninput="slid()">
+          <input type="number" class="amount" id="raiseNum" inputmode="numeric" value="${me.min_raise_to}" oninput="typed()"
+            onkeydown="if (event.key === 'Enter') raiseNow(); else if (event.key === 'Escape') this.blur();"></div>
         </div>
-        <button class="btn raise" id="raiseBtn" onclick="act('raise', $('raiseAmt').value)"></button>`;
+        <button class="btn raise" id="raiseBtn" onclick="raiseNow()"></button>`;
       else if (canRaise) html += `<button class="btn raise" onclick="act('allin')">All in ${fmt(me.max_raise_to)}</button>`;
     } else if (s.stage === 'waiting') {
       html = `<button class="btn raise" onclick="send('/start')" ${s.players.length < 2 ? 'disabled' : ''}>Deal the cards</button>`;
@@ -1483,7 +1515,9 @@ function renderControls(s) {
       const t = s.players.find(p => p.turn);
       html = `<span class="status">${t ? 'Waiting for ' + esc(t.name) + '…' : ''}</span>`;
     }
-    if (me.can_rebuy) html += `<button class="btn ghost" onclick="send('/rebuy')">Rebuy</button>`;
+    if (me.can_rebuy) html += `<span class="rebuy"><input type="number" class="amount" id="rebuyAmt" inputmode="numeric"
+        value="${s.buyin.default}" min="${s.buyin.min}" max="${s.buyin.max}" onkeydown="if (event.key === 'Enter') rebuyNow()">
+        <button class="btn ghost" onclick="rebuyNow()">Buy back in</button></span>`;
     c.innerHTML = `<div class="turnbar"><div></div></div><div class="panel">${html}</div>`;
     if ($('raiseAmt')) slid();
     fit();
@@ -1491,23 +1525,45 @@ function renderControls(s) {
   const bar = c.querySelector('.turnbar div');
   if (bar) bar.style.width = me.my_turn && s.time_left != null ? (100 * s.time_left / s.turn_time) + '%' : '0%';
 }
-function slid() {
-  const r = $('raiseAmt'), v = +r.value, me = latest.me;
-  r.style.setProperty('--fill', (100 * (v - r.min) / Math.max(1, r.max - r.min)) + '%');
-  $('raiseBtn').textContent = v >= me.max_raise_to ? `All in ${fmt(v)}` : `${me.current_bet ? 'Raise to' : 'Bet'} ${fmt(v)}`;
+function raiseLabel(v) {
+  const me = latest.me, r = $('raiseAmt');
+  const pos = Math.max(0, Math.min(1, (v - r.min) / Math.max(1, r.max - r.min)));
+  r.style.setProperty('--fill', 100 * pos + '%');
+  $('raiseNum').classList.toggle('bad', !(v >= me.min_raise_to && v <= me.max_raise_to));
+  $('raiseBtn').innerHTML = (!v ? 'Raise' : v >= me.max_raise_to ? `All in ${fmt(me.max_raise_to)}` : `${me.current_bet ? 'Raise to' : 'Bet'} ${fmt(v)}`) + '<kbd>↵</kbd>';
+}
+function slid() { $('raiseNum').value = $('raiseAmt').value; raiseLabel(+$('raiseAmt').value); }
+function typed() { const v = Math.round(+$('raiseNum').value); $('raiseAmt').value = v; raiseLabel(v); }
+function raiseNow() {
+  const me = latest.me, v = Math.round(+$('raiseNum').value);
+  if (!v) return toast('Type an amount to raise');
+  if (v > me.max_raise_to) return toast(`You only have ${fmt(me.max_raise_to)} — use All in to bet everything`);
+  if (v < me.min_raise_to) return toast(`The minimum raise is to ${fmt(me.min_raise_to)}`);
+  act('raise', v);
+}
+function rebuyNow() {
+  const b = latest.buyin, v = Math.round(+$('rebuyAmt').value);
+  if (!(v >= b.min && v <= b.max)) return toast(`Buy-in must be between ${fmt(b.min)} and ${fmt(b.max)}`);
+  send('/rebuy', { amount: v });
 }
 function preset(k) {
   const me = latest.me, r = $('raiseAmt');
   let v = k === 'min' ? me.min_raise_to : k === 'max' ? me.max_raise_to : me.current_bet + Math.round((latest.pot + me.to_call) * k);
   r.value = Math.max(me.min_raise_to, Math.min(me.max_raise_to, v));
   slid();
+  $('raiseNum').focus(); $('raiseNum').select();
 }
 addEventListener('keydown', e => {
   if (!latest || !latest.me.my_turn || e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase();
-  if (k === 'f') act('fold');
+  if (/^[0-9]$/.test(k) && $('raiseNum')) {   // start typing a raise amount from anywhere
+    e.preventDefault();
+    $('raiseNum').value = k; $('raiseNum').focus(); typed();
+  } else if (k === 'enter' && $('raiseNum') && e.target.tagName !== 'BUTTON') { e.preventDefault(); raiseNow(); }
+  else if (k === 'f') act('fold');
   else if (k === 'c') act(latest.me.can_check ? 'check' : 'call');
-  else if (k === 'r' && $('raiseAmt')) act('raise', $('raiseAmt').value);
+  else if (k === 'r' && $('raiseNum')) raiseNow();
 });
 
 // ---------------------------------------------------------------- network
@@ -1528,13 +1584,18 @@ async function send(path, body) {
 const act = (action, amount) => send('/action', { action, amount });
 async function join() {
   try {
-    const j = await api('/join', { name: $('name').value });
+    const j = await api('/join', { name: $('name').value, buyin: $('buyin').value });
     token = j.token;
     try { localStorage.setItem('pokerToken', token); } catch (e) {}
     poll();
   } catch (e) { $('joinErr').textContent = e.message; }
 }
-$('name').addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
+$('name').addEventListener('keydown', e => { if (e.key === 'Enter') $('buyin').focus(); });
+$('buyin').addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
+fetch('/config').then(r => r.json()).then(c => {
+  $('buyin').value = c.buyin.default; $('buyin').min = c.buyin.min; $('buyin').max = c.buyin.max;
+  $('buyinRange').textContent = `(${fmt(c.buyin.min)} – ${fmt(c.buyin.max)})`;
+}).catch(() => {});
 async function leave() {
   if (!confirm('Leave the table? Your chips are lost.')) return;
   try { await api('/leave'); } catch (e) {}
@@ -1571,7 +1632,9 @@ def main():
     global GAME
     ap = argparse.ArgumentParser(description="LAN Texas Hold'em server")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--chips", type=int, default=1000, help="starting stack")
+    ap.add_argument("--chips", type=int, default=1000, help="suggested buy-in shown to players (default 1000)")
+    ap.add_argument("--min-buyin", type=int, help="smallest allowed buy-in (default: 10 big blinds)")
+    ap.add_argument("--max-buyin", type=int, help="largest allowed buy-in (default: 10x --chips)")
     ap.add_argument("--sb", type=int, default=10, help="small blind")
     ap.add_argument("--bb", type=int, default=20, help="big blind")
     ap.add_argument("--turn-time", type=int, default=60, help="seconds per turn before auto check/fold")
@@ -1583,7 +1646,8 @@ def main():
     a = ap.parse_args()
     if not 1 <= a.reveal_after <= 50:
         ap.error("--reveal-after must be between 1 and 50")
-    GAME = Game(a.chips, a.sb, a.bb, a.turn_time, None if a.no_prank else a.prank, a.reveal_after)
+    GAME = Game(a.chips, a.sb, a.bb, a.turn_time, None if a.no_prank else a.prank, a.reveal_after,
+                a.min_buyin, a.max_buyin)
     threading.Thread(target=clock, daemon=True).start()
     threading.Thread(target=console, daemon=True).start()
     try:
